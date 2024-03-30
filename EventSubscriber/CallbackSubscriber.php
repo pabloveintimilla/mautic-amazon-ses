@@ -14,18 +14,18 @@ use MauticPlugin\AmazonSESBundle\AmazonSESBundle;
 
 use GuzzleHttp\Client;
 use GuzzleHttp\Exception\TransferException;
-use Mautic\EmailBundle\Mailer\Transport\CallbackTransportInterface;
-use Mautic\EmailBundle\MonitoredEmail\Processor\Bounce\Definition\Type;
 use Psr\Log\LoggerInterface;
-use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpKernel\Exception\HttpException;
 use Symfony\Component\Mime\Address;
 use Symfony\Contracts\Translation\TranslatorInterface;
 
+use MauticPlugin\AmazonSESBundle\Services\AmazonSES\BouncedEmail;
+use MauticPlugin\AmazonSESBundle\Services\AmazonSES\ComplaintEmail;
 
 class CallbackSubscriber implements EventSubscriberInterface
 {
     protected TransportWebhookEvent $webhookEvent;
+    protected array $payload;
 
     public function __construct(
         private TransportCallback $transportCallback,
@@ -54,31 +54,17 @@ class CallbackSubscriber implements EventSubscriberInterface
             return;
         }
 
-        try {
-            $contents = $this->webhookEvent->getRequest()->getContent();
-            $payload = json_decode($contents, true, 512, JSON_THROW_ON_ERROR);
-        } catch (\Exception $e) {
-            $message = 'AmazonCallback: ' . $e->getMessage();
-            $this->logger->error($message);
-            $this->webhookEvent->setResponse(new Response($message, Response::HTTP_BAD_REQUEST));
-            return;
-        }
+        $this->payload = $this->webhookEvent->getRequest()->request->all();
 
         $type    = '';
-
-        if (0 !== json_last_error()) {
-            throw new HttpException(400, 'AmazonCallback: Invalid JSON Payload');
+        if (array_key_exists('Type', $this->payload)) {
+            $type = $this->payload['Type'];
+        } elseif (array_key_exists('eventType', $this->payload)) {
+            $type = $this->payload['eventType'];
         }
 
-        if (array_key_exists('Type', $payload)) {
-            $type = $payload['Type'];
-        } elseif (array_key_exists('eventType', $payload)) {
-            $type = $payload['eventType'];
-        } else {
-            throw new HttpException(Response::HTTP_BAD_REQUEST, "Key 'Type' not found in payload");
-        }
         try {
-            $this->processJsonPayload($payload, $type);
+            $this->processJsonPayload($type);
         } catch (\Exception $e) {
             $message = 'AmazonCallback: ' . $e->getMessage();
             $this->logger->error($message);
@@ -108,6 +94,17 @@ class CallbackSubscriber implements EventSubscriberInterface
             $this->webhookEvent->setResponse(new Response($message, Response::HTTP_BAD_REQUEST));
             return false;
         }
+
+        //Check type
+        if (
+            !array_key_exists('Type', $postData) &&
+            !array_key_exists('eventType', $postData)
+        ) {
+            $message = "Key 'Type' not found in payload";
+            $this->webhookEvent->setResponse(new Response($message, Response::HTTP_BAD_REQUEST));
+            return false;
+        }
+
         return true;
     }
 
@@ -119,13 +116,13 @@ class CallbackSubscriber implements EventSubscriberInterface
      * @see https://docs.aws.amazon.com/ses/latest/dg/event-publishing-retrieving-sns-examples.html#event-publishing-retrieving-sns-bounce
      * @param array<string, mixed> $payload from Amazon SES
      */
-    public function processJsonPayload(array $payload, string $type): void
+    public function processJsonPayload(string $type, $message = ''): void
     {
         switch ($type) {
             case 'SubscriptionConfirmation':
                 // Confirm Amazon SNS subscription by calling back the SubscribeURL from the playload
                 try {
-                    $response = $this->httpClient->get($payload['SubscribeURL']);
+                    $response = $this->httpClient->get($this->payload['SubscribeURL']);
                     if (200 == $response->getStatusCode()) {
                         $this->logger->info('Callback to SubscribeURL from Amazon SNS successfully');
                     }
@@ -136,96 +133,89 @@ class CallbackSubscriber implements EventSubscriberInterface
 
             case 'Notification':
                 try {
-                    $message = json_decode($payload['Message'], true, 512, JSON_THROW_ON_ERROR);
+                    $message = json_decode($this->payload['Message'], true, 512, JSON_THROW_ON_ERROR);
                 } catch (\Exception $e) {
                     $this->logger->error('AmazonCallback: Invalid Notification JSON Payload');
                     throw new HttpException(400, 'AmazonCallback: Invalid Notification JSON Payload');
                 }
 
-                $this->processJsonPayload($message, $message['notificationType']);
+                $this->processJsonPayload($message['notificationType'], $message);
                 break;
             case 'Complaint':
-                foreach ($payload['complaint']['complainedRecipients'] as $complainedRecipient) {
-                    $reason = null;
-                    if (isset($payload['complaint']['complaintFeedbackType'])) {
-                        // http://docs.aws.amazon.com/ses/latest/DeveloperGuide/notification-contents.html#complaint-object
-                        switch ($payload['complaint']['complaintFeedbackType']) {
-                            case 'abuse':
-                                $reason = $this->translator->trans('mautic.plugin.scmailerses.complaint.reason.abuse');
-                                break;
-                            case 'auth-failure':
-                                $reason = $this->translator->trans('mautic.plugin.scmailerses.complaint.reason.auth_failure');
-                                break;
-                            case 'fraud':
-                                $reason = $this->translator->trans('mautic.plugin.scmailerses.complaint.reason.fraud');
-                                break;
-                            case 'not-spam':
-                                $reason = $this->translator->trans('mautic.plugin.scmailerses.complaint.reason.not_spam');
-                                break;
-                            case 'other':
-                                $reason = $this->translator->trans('mautic.plugin.scmailerses.complaint.reason.other');
-                                break;
-                            case 'virus':
-                                $reason = $this->translator->trans('mautic.plugin.scmailerses.complaint.reason.virus');
-                                break;
-                            default:
-                                $reason = $this->translator->trans('mautic.plugin.scmailerses.complaint.reason.unknown');
-                                break;
-                        }
-                    }
-
-                    if (null === $reason) {
-                        if (empty($payload['complaint']['complaintSubType'])) {
-                            $reason = $this->translator->trans('mautic.plugin.scmailerses.complaint.reason.unknown');
-                        } else {
-                            $reason = $payload['complaint']['complaintSubType'];
-                        }
-                    }
-
-                    $emailId = null;
-
-                    if (isset($payload['mail']['headers'])) {
-                        foreach ($payload['mail']['headers'] as $header) {
-                            if ('X-EMAIL-ID' === $header['name']) {
-                                $emailId = $header['value'];
-                            }
-                        }
-                    }
-                    $address = Address::create($complainedRecipient['emailAddress']);
-                    $this->transportCallback->addFailureByAddress($address->getAddress(), $reason, DoNotContact::UNSUBSCRIBED, $emailId);
-
-                    $this->logger->debug("Unsubscribe email '" . $address->getAddress() . "'");
-                }
-
+                $this->processComplaint();
                 break;
             case 'Bounce':
-
-                if ('Permanent' == $payload['bounce']['bounceType']) {
-                    $emailId = null;
-
-                    if (isset($payload['mail']['headers'])) {
-                        foreach ($payload['mail']['headers'] as $header) {
-                            if ('X-EMAIL-ID' === $header['name']) {
-                                $emailId = $header['value'];
-                            }
-                        }
-                    }
-
-                    // Get bounced recipients in an array
-                    $bouncedRecipients = $payload['bounce']['bouncedRecipients'];
-                    foreach ($bouncedRecipients as $bouncedRecipient) {
-                        $bounceCode =  array_key_exists('diagnosticCode', $bouncedRecipient) ? $bouncedRecipient['diagnosticCode'] : 'unknown';
-                        $bounceCode .= ' AWS bounce type: ' . $payload['bounce']['bounceSubType'];
-                        $address = Address::create($bouncedRecipient['emailAddress']);
-                        $this->transportCallback->addFailureByAddress($address->getAddress(), $bounceCode, DoNotContact::BOUNCED, $emailId);
-                        $this->logger->debug("Mark email '" . $bouncedRecipient['emailAddress'] . "' as bounced, reason: " . $bounceCode);
-                    }
-                }
+                $this->processBounce();
                 break;
             default:
-                $this->logger->warning('Received SES webhook of type ' . $payload['Type'] . " but couldn't understand payload");
-                $this->logger->debug('SES webhook payload: ' . json_encode($payload));
-                throw new HttpException(400, "Received SES webhook of type '$payload[Type]' but couldn't understand payload");
+                $this->logger->warning('Received SES webhook of type ' . $this->payload['Type'] . " but couldn't understand payload");
+                $this->logger->debug('SES webhook payload: ' . json_encode($this->payload));
+                throw new HttpException(400, "Received SES webhook of type '$this->payload[Type]' but couldn't understand payload");
+        }
+    }
+
+    /**
+     * Process bounce type
+     */
+    protected function processBounce()
+    {
+        $bouncedEmail = new BouncedEmail($this->payload);
+
+        // Process only permanent bounce
+        if (!$bouncedEmail->shouldRemoved()) {
+            return;
+        }
+
+        $emailId = $bouncedEmail->getHeaders('X-EMAIL-ID');
+        $bouncedRecipients = $bouncedEmail->getRecipientDetails();
+
+        foreach ($bouncedRecipients as $bouncedRecipient) {
+            $address = Address::create($bouncedRecipient->getEmailAddress());
+            $this->transportCallback
+                ->addFailureByAddress($address->getAddress(), (string) $bouncedRecipient, DoNotContact::BOUNCED, $emailId);
+            $this->logger->debug((string) $bouncedRecipient . ' ' . $bouncedEmail->getBounceSubType());
+        }
+    }
+
+    /**
+     * Process complaint type
+     */
+    protected function processComplaint()
+    {
+        $complaintEmail = new ComplaintEmail($this->payload);
+        $complainedRecipients = $complaintEmail->getReceipts();
+
+        foreach ($complainedRecipients as $complainedRecipient) {
+            // http://docs.aws.amazon.com/ses/latest/DeveloperGuide/notification-contents.html#complaint-object
+            switch ($complaintEmail->getComplaintFeedbackType()) {
+                case 'abuse':
+                    $reason = $this->translator->trans('mautic.plugin.scmailerses.complaint.reason.abuse');
+                    break;
+                case 'auth-failure':
+                    $reason = $this->translator->trans('mautic.plugin.scmailerses.complaint.reason.auth_failure');
+                    break;
+                case 'fraud':
+                    $reason = $this->translator->trans('mautic.plugin.scmailerses.complaint.reason.fraud');
+                    break;
+                case 'not-spam':
+                    $reason = $this->translator->trans('mautic.plugin.scmailerses.complaint.reason.not_spam');
+                    break;
+                case 'other':
+                    $reason = $this->translator->trans('mautic.plugin.scmailerses.complaint.reason.other');
+                    break;
+                case 'virus':
+                    $reason = $this->translator->trans('mautic.plugin.scmailerses.complaint.reason.virus');
+                    break;
+                default:
+                    $reason = $this->translator->trans('mautic.plugin.scmailerses.complaint.reason.unknown');
+                    break;
+            }
+
+            $emailId = $complaintEmail->getHeaders('X-EMAIL-ID');
+            $address = Address::create($complainedRecipient);
+            $this->transportCallback->addFailureByAddress($address->getAddress(), $reason, DoNotContact::UNSUBSCRIBED, $emailId);
+
+            $this->logger->debug("Unsubscribe email '" . $address->getAddress() . "'");
         }
     }
 }

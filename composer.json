@@ -5,7 +5,8 @@
     "require": {
         "php": ">=8.0.0",
         "mautic/core-lib": "^5.0",        
-        "symfony/amazon-mailer": "^6.0"
+        "symfony/amazon-mailer": "^6.0",
+        "teknasyon-teknoloji/aws-ses-notification": "^2.0"
     },
     "license": "GPL-3.0-or-later",
     "keywords": [
