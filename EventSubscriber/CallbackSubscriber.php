@@ -21,11 +21,13 @@ use Symfony\Contracts\Translation\TranslatorInterface;
 
 use MauticPlugin\AmazonSESBundle\Services\AmazonSES\BouncedEmail;
 use MauticPlugin\AmazonSESBundle\Services\AmazonSES\ComplaintEmail;
+use Symfony\Component\HttpKernel\Exception\BadRequestHttpException;
 
 class CallbackSubscriber implements EventSubscriberInterface
 {
     protected TransportWebhookEvent $webhookEvent;
     protected array $payload;
+    protected array $allowdTypes = ['Type', 'eventType', 'notificationType'];
 
     public function __construct(
         private TransportCallback $transportCallback,
@@ -55,13 +57,7 @@ class CallbackSubscriber implements EventSubscriberInterface
         }
 
         $this->payload = $this->webhookEvent->getRequest()->request->all();
-
-        $type    = '';
-        if (array_key_exists('Type', $this->payload)) {
-            $type = $this->payload['Type'];
-        } elseif (array_key_exists('eventType', $this->payload)) {
-            $type = $this->payload['eventType'];
-        }
+        $type = $this->parseType();
 
         try {
             $this->processJsonPayload($type);
@@ -71,7 +67,8 @@ class CallbackSubscriber implements EventSubscriberInterface
             $this->webhookEvent->setResponse(new Response($message, Response::HTTP_BAD_REQUEST));
             return;
         }
-        $webhookEvent->setResponse(new Response('Callback processed'));
+
+        $webhookEvent->setResponse(new Response("Callback processed: $type"));
     }
 
     /**
@@ -89,7 +86,7 @@ class CallbackSubscriber implements EventSubscriberInterface
         // Check post data
         $postData = $this->webhookEvent->getRequest()->request->all();
         if (empty($postData)) {
-            $message = 'AmazonSESCallback: There is no data to process.';
+            $message = 'There is no data to process.';
             $this->logger->error($message);
             $this->webhookEvent->setResponse(new Response($message, Response::HTTP_BAD_REQUEST));
             return false;
@@ -97,10 +94,9 @@ class CallbackSubscriber implements EventSubscriberInterface
 
         //Check type
         if (
-            !array_key_exists('Type', $postData) &&
-            !array_key_exists('eventType', $postData)
+            !$this->arrayKeysExists($this->allowdTypes, $postData)
         ) {
-            $message = "Key 'Type' not found in payload";
+            $message = "Type of request is invalid";
             $this->webhookEvent->setResponse(new Response($message, Response::HTTP_BAD_REQUEST));
             return false;
         }
@@ -120,26 +116,10 @@ class CallbackSubscriber implements EventSubscriberInterface
     {
         switch ($type) {
             case 'SubscriptionConfirmation':
-                // Confirm Amazon SNS subscription by calling back the SubscribeURL from the playload
-                try {
-                    $response = $this->httpClient->get($this->payload['SubscribeURL']);
-                    if (200 == $response->getStatusCode()) {
-                        $this->logger->info('Callback to SubscribeURL from Amazon SNS successfully');
-                    }
-                } catch (TransferException $e) {
-                    $this->logger->error('Callback to SubscribeURL from Amazon SNS failed, reason: ' . $e->getMessage());
-                }
+                $this->processSubscriptionConfirmation();
                 break;
-
             case 'Notification':
-                try {
-                    $message = json_decode($this->payload['Message'], true, 512, JSON_THROW_ON_ERROR);
-                } catch (\Exception $e) {
-                    $this->logger->error('AmazonCallback: Invalid Notification JSON Payload');
-                    throw new HttpException(400, 'AmazonCallback: Invalid Notification JSON Payload');
-                }
-
-                $this->processJsonPayload($message['notificationType'], $message);
+                $this->processNotification();
                 break;
             case 'Complaint':
                 $this->processComplaint();
@@ -148,9 +128,10 @@ class CallbackSubscriber implements EventSubscriberInterface
                 $this->processBounce();
                 break;
             default:
-                $this->logger->warning('Received SES webhook of type ' . $this->payload['Type'] . " but couldn't understand payload");
+                $message = 'Received SES webhook of type ' . $this->payload['Type'] . " but couldn't understand payload";
+                $this->logger->warning($message);
                 $this->logger->debug('SES webhook payload: ' . json_encode($this->payload));
-                throw new HttpException(400, "Received SES webhook of type '$this->payload[Type]' but couldn't understand payload");
+                throw new BadRequestHttpException($message);
         }
     }
 
@@ -217,5 +198,72 @@ class CallbackSubscriber implements EventSubscriberInterface
 
             $this->logger->debug("Unsubscribe email '" . $address->getAddress() . "'");
         }
+    }
+
+    /**
+     * Confirm AWS SNS to revice callback
+     * @see https://docs.aws.amazon.com/sns/latest/dg/SendMessageToHttp.prepare.html
+     */
+    protected function processSubscriptionConfirmation()
+    {
+        if (
+            !isset($this->payload['SubscribeURL'])
+            || !filter_var($this->payload['SubscribeURL'], FILTER_VALIDATE_URL)
+        ) {
+            $message = 'Invalid SubscribeURL';
+            $this->logger->error($message);
+            throw new BadRequestHttpException($message);
+        }
+        // Confirm Amazon SNS subscription by calling back the SubscribeURL from the playload
+        try {
+            $response = $this->httpClient->get($this->payload['SubscribeURL']);
+            if ($response->getStatusCode() == Response::HTTP_OK) {
+                $this->logger->info('Callback to SubscribeURL from Amazon SNS successfully');
+            }
+        } catch (TransferException $e) {
+            $message = 'Callback to SubscribeURL from Amazon SNS failed, reason: ' . $e->getMessage();
+            $this->logger->error($message);
+            throw new BadRequestHttpException($message);
+        }
+    }
+
+    /**
+     * Process notificacion callback
+     */
+    protected function processNotification()
+    {
+        $subject = isset($this->payload['Subject']) ?
+            $this->payload['Subject'] :
+            'Not subject';
+        $message = isset($this->payload['Message']) ?
+            $this->payload['Message'] :
+            'Not message';
+        $data = "$subject: $message";
+        $this->logger->info($data);
+    }
+
+    /**
+     * Get Type of callback
+     */
+    protected function parseType(): string
+    {
+        $type = array_intersect_key(
+            array_flip($this->allowdTypes),
+            array_flip(array_keys($this->payload))
+        );
+        $key = array_keys($type)[0];
+        return $this->payload[$key];
+    }
+
+    /**
+     * Utility function to identify if a array of keys exist
+     */
+    protected function arrayKeysExists(array $keys, array $array): bool
+    {
+        $diff = array_intersect_key(
+            array_flip($keys),
+            array_flip(array_keys($array))
+        );
+        return count($diff) > 0;
     }
 }
