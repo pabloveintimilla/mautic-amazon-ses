@@ -1,6 +1,6 @@
 {
-    "name": "pablo.veintimilla/mautic-amazon-ses",
-    "description": "Provides Amazon SES as an email transport and callback to process bounces",
+    "name": "pabloveintimilla/mautic-amazon-ses",
+    "description": "Mautic 5 plugin that provides Amazon SES as an email transport and callback to process bounces",
     "type": "mautic-plugin",
     "require": {
         "php": ">=8.0.0",

@@ -1,6 +1,8 @@
 # Mautic 5 Amazon SES
 
-![Amazons SES](Assets/img/icon.png "Amazons SES")
+<p style="text-align: center;">
+<img src="Assets/img/icon.png" alt="Amazon SES" width="200"/>
+</p>
 
 This plugin enable Mautic 5 to run AWS SES as a email transport and provide a callback to process bounces.
 
