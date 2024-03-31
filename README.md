@@ -17,7 +17,7 @@ composer require pabloveintimilla/mautic-amazon-ses
 2. Install plugin
 
 ```
-php bin\console mautic:plugins:reload
+php bin/console mautic:plugins:reload
 ```
 
 ## CONFIGURATION MAUTIC

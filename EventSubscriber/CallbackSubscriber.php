@@ -52,11 +52,11 @@ class CallbackSubscriber implements EventSubscriberInterface
     public function processCallbackRequest(TransportWebhookEvent $webhookEvent): void
     {
         $this->webhookEvent = $webhookEvent;
+
+        $this->parseRequest();
         if (!$this->validateCallbackRequest()) {
             return;
         }
-
-        $this->payload = $this->webhookEvent->getRequest()->request->all();
         $type = $this->parseType();
 
         try {
@@ -68,7 +68,24 @@ class CallbackSubscriber implements EventSubscriberInterface
             return;
         }
 
-        $webhookEvent->setResponse(new Response("Callback processed: $type"));
+        $this->webhookEvent->setResponse(new Response("Callback processed: $type"));
+    }
+
+    /**
+     * Parse request to correct content type
+     */
+    protected function parseRequest()
+    {
+        $request = $this->webhookEvent->getRequest();
+        $contentType = $request->getContentType();
+        switch ($contentType) {
+            case 'json':
+                $this->payload = $request->request->all();
+                break;
+            default:
+                $this->payload = json_decode($request->getContent(), true, 512, JSON_THROW_ON_ERROR);
+                break;
+        }
     }
 
     /**
@@ -83,18 +100,17 @@ class CallbackSubscriber implements EventSubscriberInterface
             return false;
         }
 
-        // Check post data
-        $postData = $this->webhookEvent->getRequest()->request->all();
-        if (empty($postData)) {
+        // Check data
+        if (!is_array($this->payload)) {
             $message = 'There is no data to process.';
-            $this->logger->error($message);
+            $this->logger->error($message . $this->webhookEvent->getRequest()->getContent());
             $this->webhookEvent->setResponse(new Response($message, Response::HTTP_BAD_REQUEST));
             return false;
         }
 
         //Check type
         if (
-            !$this->arrayKeysExists($this->allowdTypes, $postData)
+            !$this->arrayKeysExists($this->allowdTypes, $this->payload)
         ) {
             $message = "Type of request is invalid";
             $this->webhookEvent->setResponse(new Response($message, Response::HTTP_BAD_REQUEST));
