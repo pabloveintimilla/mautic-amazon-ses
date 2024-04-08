@@ -144,9 +144,8 @@ class CallbackSubscriber implements EventSubscriberInterface
                 $this->processBounce();
                 break;
             default:
-                $message = 'Received SES webhook of type ' . $this->payload['Type'] . " but couldn't understand payload";
-                $this->logger->warning($message);
-                $this->logger->debug('SES webhook payload: ' . json_encode($this->payload));
+                $message = "Received SES webhook of type: $type but couldn't understand payload: ";
+                $this->logger->error($message . json_encode($this->payload));
                 throw new BadRequestHttpException($message);
         }
     }
