@@ -26,7 +26,7 @@ Be sure to use the `ses+api` as Data Source Name (DSN).
 The following is the example for the DSN.
 `ses+api://ACCESS_KEY:SECRET_KEY@default?region=REGION`
 
-Follow the steps to setup Mailjet SMTP DSN:
+Follow the steps to setup plugin DSN:
 
 1. Navigate to Configuration > Mail Send Settings
 2. Update the following fields leaving rest default or empty,
@@ -47,7 +47,7 @@ The `<region>` is AWS region were run AWS SES in your account
 
 Process bounces you need to configure an AWS SNS to send a callback to Mautic.
 
-1. Create a SNS topic attached to AWS SES Identity.
+1. Create a SNS topic attached to a AWS SES Identity.
 2. Configure a suscription:
    - Protocol: HTTPS
    - **Enable raw message delivery** 
