@@ -14,7 +14,13 @@ This plugin enable Mautic 5 to run AWS SES as a email transport and provide a ca
 composer require pabloveintimilla/mautic-amazon-ses
 ```
 
-2. Install plugin
+2. Clear cache
+
+```
+php bin/console cache:clear
+```
+
+3. Install plugin
 
 ```
 php bin/console mautic:plugins:reload
@@ -47,7 +53,7 @@ The `<region>` is AWS region were run AWS SES in your account
 
 Process bounces you need to configure an AWS SNS to send a callback to Mautic.
 
-1. Create a SNS topic attached to a AWS SES Identity.
+1. Create a SNS topic attached to AWS SES Identity.
 2. Configure a suscription:
    - Protocol: HTTPS
    - **Enable raw message delivery** 
