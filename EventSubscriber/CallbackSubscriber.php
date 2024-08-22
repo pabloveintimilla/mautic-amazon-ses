@@ -29,6 +29,9 @@ class CallbackSubscriber implements EventSubscriberInterface
     protected array $payload;
     protected array $allowdTypes = ['Type', 'eventType', 'notificationType'];
 
+    // Define the notification types as a static variable
+    private static array $notificationTypes = ['Bounce', 'Complaint'];
+
     public function __construct(
         private TransportCallback $transportCallback,
         private CoreParametersHelper $coreParametersHelper,
@@ -124,38 +127,96 @@ class CallbackSubscriber implements EventSubscriberInterface
      * Process json request from Amazon SES.
      *
      * Based on: https://github.com/mzagmajster/mautic-ses-plugin/blob/main/Mailer/Callback/AmazonCallback.php
-     *
      * @see https://docs.aws.amazon.com/ses/latest/dg/event-publishing-retrieving-sns-examples.html#event-publishing-retrieving-sns-bounce
-     * @param array<string, mixed> $payload from Amazon SES
+     *
+     * @param string $type
+     * @param string $message
+     * @return void
      */
-    public function processJsonPayload(string $type, $message = ''): void
+    public function processJsonPayload(string $type, string $message = ''): void
     {
         switch ($type) {
             case 'SubscriptionConfirmation':
                 $this->processSubscriptionConfirmation();
                 break;
             case 'Notification':
+                if ($this->checkNotificationType($message))
+                {
+                    return; // Case true, return to force the switch scape
+                }
                 $this->processNotification();
                 break;
             case 'Complaint':
-                $this->processComplaint();
+                $this->processComplaint($message);
                 break;
             case 'Bounce':
-                $this->processBounce();
+                $this->processBounce($message);
                 break;
             default:
-                $message = "Received SES webhook of type: $type but couldn't understand payload: ";
-                $this->logger->error($message . json_encode($this->payload));
-                throw new BadRequestHttpException($message);
+                $errorMessage = "Received SES webhook of type: $type but couldn't understand payload.";
+                $this->logger->error($errorMessage . json_encode($this->payload));
+                throw new BadRequestHttpException($errorMessage);
         }
     }
 
     /**
-     * Process bounce type
+     * @param $message
+     *
+     * Check if the Notification has inside the 'Message' the notificationType
+     * 'Bounce' or 'Complaint'. If so, re-call the function processJsonPayload with updated params.
+     *
+     * @return bool
      */
-    protected function processBounce()
+    private function checkNotificationType($message): bool
     {
-        $bouncedEmail = new BouncedEmail($this->payload);
+        // Decode the JSON if $message !== ''
+        $decodedMessage = $message !== ''
+            ? json_decode($message, true)
+            : $this->payload;
+
+        // Check if 'Message' exists inside the JSON obj
+        if (!isset($decodedMessage['Message'])) {
+            return false;
+        }
+
+        // Decode the internal 'Message' JSON to check the type of notification
+        $internalMessage = json_decode($decodedMessage['Message'], true);
+
+        // Check if the notification type is set.
+        // And recursively call the function processJsonPayload if it's a special notification type.
+        if (isset($internalMessage['notificationType'])
+            && in_array(
+                $internalMessage['notificationType'],
+                self::$notificationTypes
+            ))
+        {
+            // Recall processJsonPayload
+            $this->processJsonPayload(
+                $internalMessage['notificationType'],
+                $internalMessage
+            );
+
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * @param $message
+     *
+     * Process bounce type
+     * @return void
+     */
+    protected function processBounce($message): void
+    {
+        // Use $message if provided and not empty, otherwise, use $this->payload
+        $payload = !empty($message)
+            ? $message
+            : $this->payload;
+
+        // Create an instance of BouncedEmail with the previously determined payload
+        $bouncedEmail = new BouncedEmail($payload);
 
         // Process only permanent bounce
         if (!$bouncedEmail->shouldRemoved()) {
@@ -174,11 +235,20 @@ class CallbackSubscriber implements EventSubscriberInterface
     }
 
     /**
+     * @param $message
+     *
      * Process complaint type
+     * @return void
      */
-    protected function processComplaint()
+    protected function processComplaint($message): void
     {
-        $complaintEmail = new ComplaintEmail($this->payload);
+        // Use the $message variable if provided and not empty, otherwise, use $this->payload
+        $payload = !empty($message)
+            ? $message
+            : $this->payload;
+
+        // Create an instance of ComplaintEmail with the previously determined payload
+        $complaintEmail       = new ComplaintEmail($payload);
         $complainedRecipients = $complaintEmail->getReceipts();
 
         foreach ($complainedRecipients as $complainedRecipient) {
