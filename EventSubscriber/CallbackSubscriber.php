@@ -130,10 +130,10 @@ class CallbackSubscriber implements EventSubscriberInterface
      * @see https://docs.aws.amazon.com/ses/latest/dg/event-publishing-retrieving-sns-examples.html#event-publishing-retrieving-sns-bounce
      *
      * @param string $type
-     * @param string $message
+     * @param $message
      * @return void
      */
-    public function processJsonPayload(string $type, string $message = ''): void
+    public function processJsonPayload(string $type, $message = ''): void
     {
         switch ($type) {
             case 'SubscriptionConfirmation':
