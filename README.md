@@ -5,6 +5,7 @@
 </p>
 
 This plugin enable Mautic 5 to run AWS SES as a email transport and provide a callback to process bounces.
+Tested in Mautic 5.0.0 to 5.2.0
 
 ## INSTALLATION
 
